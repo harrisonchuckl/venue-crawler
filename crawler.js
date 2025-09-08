@@ -1,136 +1,228 @@
-// crawler.js (CommonJS)
-// Crawl listing pages for TagVenue & HireSpace with Playwright,
-// extract venue links, and POST them to your Apps Script webhook.
+// crawler.js
+// Playwright crawler with auto-scroll + graceful "no more pages" exit.
 
-// ----- Config taken from environment (set by GitHub Actions) -----
-const BRAND = process.env.BRAND || 'TagVenue';        // TagVenue | HireSpace
-const SHARD_INDEX = Number(process.env.SHARD_INDEX || 0); // 0-based shard index
-const SHARD_TOTAL = Number(process.env.SHARD_TOTAL || 1); // total shards
-const MAX_PAGES_PER_RUN = Number(process.env.MAX_PAGES || 9999); // optional cap
-const APPS_SCRIPT_WEBHOOK = process.env.APPS_SCRIPT_WEBHOOK;      // required
+const fs = require("fs/promises");
+const { chromium } = require("playwright");
+
+// ===== Settings via env (set in your workflow) =====
+const BRAND        = process.env.BRAND || "HireSpace";  // TagVenue | HireSpace
+const SHARD_INDEX  = Number(process.env.SHARD_INDEX || 1);
+const SHARD_TOTAL  = Number(process.env.SHARD_TOTAL || 1);
+const MAX_PAGES    = Number(process.env.MAX_PAGES || 500); // hard ceiling
+const STOP_AFTER_EMPTY = Number(process.env.STOP_AFTER_EMPTY || 2); // consecutive empty pages to stop
+const APPS_SCRIPT_WEBHOOK = process.env.APPS_SCRIPT_WEBHOOK;
+const JOB_TOKEN    = process.env.JOB_TOKEN || ""; // optional header for your Apps Script
 
 if (!APPS_SCRIPT_WEBHOOK) {
-  console.error('Missing APPS_SCRIPT_WEBHOOK env var.');
+  console.error("Missing APPS_SCRIPT_WEBHOOK env var.");
   process.exit(1);
 }
 
-// ----- Imports -----
-const { chromium } = require('playwright');
-const selectors = require('./selectors.config.js');
+// ===== Brand config =====
+const brands = {
+  TagVenue: {
+    seed: (page) =>
+      `https://www.tagvenue.com/uk/search/event-venue?latitude_from=47.5554486&latitude_to=61.5471111&longitude_from=-18.5319589&longitude_to=9.5844157&form_timestamp=1757239921&getAllRoomsPositions=true&hideRoomsData=false&items_per_page=36&map_zoom=&people=&date=&time_from=&time_to=&room_layout=0&min_price=&max_price=&price_range=&price_method=&neighbourhood=London%2C%20United%20Kingdom&page=${page}&room_tag=event-venue&supervenues_only=false&flexible_cancellation_only=false&no_age_restriction=false&iso_country_code=GB&view=results&trigger=initMap`,
+    listLinkSelector:
+      'a[data-qa="space-card-link"], a[data-qa="venue-card-link"], a[href*="/space/"], a[href*="/venues/"]',
+    cardNameSelector:
+      '[data-qa="space-card-title"], .venue-card__title, h3, h2',
+    humanCheckText: /verify|robot|captcha|access denied/i
+  },
+  HireSpace: {
+    seed: (page) =>
+      `https://hirespace.com/Search?budget=30-100000&area=United+Kingdom&googlePlaceId=ChIJqZHHQhE7WgIReiWIMkOg-MQ&page=${page}&perPage=36&sort=relevance`,
+    listLinkSelector:
+      'a[href^="/Spaces/"], a[href^="/Space/"], a[href^="/Venues/"]',
+    cardNameSelector:
+      '.card-title, .venue-card__title, h3, h2',
+    humanCheckText: /verify|robot|captcha|access denied/i
+  }
+};
 
-// Node 18+ has global fetch; for older Node you could use node-fetch.
-// GitHub Actions uses Node 20 by default, so global fetch is fine.
-
-// ----- Helpers -----
-function nextPageUrl(baseUrl, pageParam, pageNum) {
-  const u = new URL(baseUrl);
-  u.searchParams.set(pageParam, String(pageNum));
-  return u.toString();
+const cfg = brands[BRAND];
+if (!cfg) {
+  console.error(`Unknown BRAND: ${BRAND}`);
+  process.exit(1);
 }
 
-async function gotoAndWait(page, url, cardSelector) {
-  // Do NOT use "networkidle" on these sites (maps & trackers poll forever).
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-  await page.waitForSelector(cardSelector, { timeout: 90_000 });
+// ===== Helpers =====
+
+async function autoScroll(page, {
+  step = 0.9,      // fraction of viewport height per tick
+  maxTicks = 45,   // safety cap
+  idleMs = 300,    // wait after each scroll
+  selectorToCount  // the items to watch for growth
+}) {
+  let last = 0;
+  for (let i = 0; i < maxTicks; i++) {
+    await page.evaluate(s => window.scrollBy(0, Math.floor(window.innerHeight * s)), step);
+    await page.waitForTimeout(idleMs);
+
+    const count = await page.$$eval(selectorToCount, els => els.length).catch(() => 0);
+    if (count <= last) {
+      // one last push to very bottom
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(idleMs);
+      const count2 = await page.$$eval(selectorToCount, els => els.length).catch(() => 0);
+      if (count2 <= last) break;
+      last = count2;
+    } else {
+      last = count;
+    }
+  }
+  return last;
 }
 
-function *pagedIterator(firstPage, hardMax, shardIndex, shardTotal) {
-  // Interleaved sharding: shard 0 = 1,1+T,1+2T... ; shard 1 = 2,2+T,...
-  let p = firstPage + shardIndex;
-  while (p <= hardMax) {
-    yield p;
-    p += shardTotal;
+async function postToAppsScript(rows) {
+  try {
+    const resp = await fetch(APPS_SCRIPT_WEBHOOK, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(JOB_TOKEN ? { "x-job-token": JOB_TOKEN } : {})
+      },
+      body: JSON.stringify({ kind: "catalog-batch", rows })
+    });
+    const text = await resp.text();
+    console.log(`Posted to Apps Script: ${resp.status} ${resp.statusText} | body: ${text.slice(0, 240)}`);
+  } catch (e) {
+    console.error("Failed POST to Apps Script:", e.message);
   }
 }
 
-// ----- Main run -----
-(async () => {
-  const cfg = selectors[BRAND];
-  if (!cfg) {
-    console.error(`Unknown BRAND "${BRAND}". Use TagVenue or HireSpace.`);
-    process.exit(1);
-  }
+function isThisShard(pageNumber) {
+  // Visit only pages whose (index modulo total) matches this shard index
+  return (pageNumber - 1) % SHARD_TOTAL === (SHARD_INDEX - 1);
+}
 
-  const { startUrl, listItemSelector, pageParam, brand, hardMaxPages } = cfg;
+// ===== Main =====
 
+async function run() {
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: ["--no-sandbox", "--disable-setuid-sandbox"]
   });
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
 
-  const seen = new Set();         // dedupe across pages in this run
-  const rows = [];                // rows to POST to Apps Script
-  let pagesVisited = 0;
-  let emptyPagesInARow = 0;
+  let allRows = [];
+  let emptyStreak = 0;
+  const seenLinks = new Set();
 
-  for (const pageNum of pagedIterator(1, Math.min(hardMaxPages, MAX_PAGES_PER_RUN), SHARD_INDEX, SHARD_TOTAL)) {
-    const url = nextPageUrl(startUrl, pageParam, pageNum);
+  for (let p = 1; p <= MAX_PAGES; p++) {
+    if (!isThisShard(p)) continue;
 
+    const url = cfg.seed(p);
+    let response;
     try {
-      await gotoAndWait(page, url, listItemSelector);
+      response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
     } catch (e) {
-      console.log(`[${brand}] page ${pageNum} navigation error: ${e.message}`);
-      // If we can’t reach this page, skip to next shard page
-      continue;
-    }
-
-    const links = await page.$$eval(listItemSelector, as =>
-      Array.from(new Set(as.map(a => a.href).filter(Boolean)))
-    ).catch(() => []);
-
-    pagesVisited++;
-    console.log(`[${brand}] page ${pageNum} => items: ${links.length}`);
-
-    // Save a quick snapshot for debugging (first two pages per shard)
-    if (pagesVisited <= 2) {
-      await page.screenshot({ path: `${brand.toLowerCase()}-p${pageNum}.png`, fullPage: true }).catch(()=>{});
-      await require('fs').promises.writeFile(
-        `${brand.toLowerCase()}-p${pageNum}.html`,
-        await page.content()
-      ).catch(()=>{});
-      console.log(`[${brand}] saved ${brand.toLowerCase()}-p${pageNum}.png/.html`);
-    }
-
-    if (!links.length) {
-      emptyPagesInARow++;
-      if (emptyPagesInARow >= 2) {
-        // Two empty pages for this shard — assume we’re past the end.
+      console.warn(`[${BRAND}] page ${p} navigation error: ${e.message}`);
+      emptyStreak++;
+      if (emptyStreak >= STOP_AFTER_EMPTY) {
+        console.log(`[${BRAND}] stopping after ${emptyStreak} consecutive empty/error pages.`);
         break;
       }
       continue;
-    } else {
-      emptyPagesInARow = 0;
     }
 
-    // Push into rows (dedup by href)
-    for (const href of links) {
-      if (seen.has(href)) continue;
-      seen.add(href);
-      rows.push({
-        source: brand,
-        dirUrl: href,
-        fetchedAt: new Date().toISOString()
-      });
+    // HTTP status check
+    const status = response ? response.status() : 0;
+    if (!response || status >= 400) {
+      console.warn(`[${BRAND}] page ${p} HTTP status ${status}. Counting as empty.`);
+      emptyStreak++;
+      if (emptyStreak >= STOP_AFTER_EMPTY) {
+        console.log(`[${BRAND}] stopping after ${emptyStreak} consecutive empty/error pages.`);
+        break;
+      }
+      continue;
     }
+
+    // quick initial settle
+    await page.waitForTimeout(700);
+
+    // human/bot wall?
+    const txt = (await page.content()).slice(0, 50_000);
+    if (cfg.humanCheckText.test(txt)) {
+      console.warn(`[${BRAND}] page ${p} looks like a verification/bot wall. Stopping.`);
+      break;
+    }
+
+    // auto-scroll to load lazy content
+    const before = await page.$$eval(cfg.listLinkSelector, els => els.length).catch(() => 0);
+    const after = await autoScroll(page, { selectorToCount: cfg.listLinkSelector });
+
+    // extract links
+    const links = await page.$$eval(cfg.listLinkSelector, as =>
+      Array.from(new Set(as.map(a => (a.href || "").trim())))
+        .filter(h => h && h.startsWith("http"))
+    ).catch(() => []);
+
+    // de-dup across pages
+    const fresh = links.filter(h => !seenLinks.has(h));
+    fresh.forEach(h => seenLinks.add(h));
+
+    // sample names (for logs)
+    const names = await page.$$eval(cfg.cardNameSelector, els =>
+      els.slice(0, 6).map(e => (e.textContent || "").trim()).filter(Boolean)
+    ).catch(() => []);
+
+    // debug artifacts for the first page we hit in this shard
+    if (allRows.length === 0) {
+      const stem = `${BRAND.toLowerCase()}-p${p}`;
+      try {
+        await page.screenshot({ path: `${stem}.png`, fullPage: true });
+        await fs.writeFile(`${stem}.html`, await page.content(), "utf8");
+      } catch (_) {}
+    }
+
+    console.log(
+      `[${BRAND}] page ${p} => items: ${links.length} (new: ${fresh.length}) | before: ${before}, after: ${after}`
+    );
+    if (names.length) console.log(`[${BRAND}] sample: ${names.join(" | ").slice(0, 180)}`);
+
+    if (after === 0 || links.length === 0 || fresh.length === 0) {
+      // Nothing here (or only repeats) → count as empty and maybe stop.
+      emptyStreak++;
+      if (emptyStreak >= STOP_AFTER_EMPTY) {
+        console.log(`[${BRAND}] stopping after ${emptyStreak} consecutive empty pages.`);
+        break;
+      }
+      // small pause before next page
+      await page.waitForTimeout(500);
+      continue;
+    }
+
+    // reset empty streak if we got something new
+    emptyStreak = 0;
+
+    // Map to rows for Sheet
+    const rows = fresh.map(h => ({
+      name: "",
+      city: "",
+      source: BRAND,
+      dirUrl: h,
+      fetchedAt: new Date().toISOString()
+    }));
+
+    allRows.push(...rows);
+
+    // politeness delay between pages
+    await page.waitForTimeout(650);
+  }
+
+  // POST batch if anything found
+  if (allRows.length) {
+    await postToAppsScript(allRows);
+  } else {
+    console.log(`[${BRAND}] no rows to post.`);
   }
 
   await browser.close();
+}
 
-  console.log(`[${brand}] total unique links collected: ${rows.length}`);
-
-  // ----- POST to Apps Script -----
-  try {
-    const resp = await fetch(APPS_SCRIPT_WEBHOOK, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      // The Apps Script you deployed should accept { rows: [...] }
-      body: JSON.stringify({ rows })
-    });
-
-    const txt = await resp.text();
-    console.log(`Posted to Apps Script: status ${resp.status}, body: ${txt.slice(0, 500)}`);
-  } catch (e) {
-    console.error(`Failed POST to Apps Script: ${e.message}`);
-  }
-})();
+run().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
