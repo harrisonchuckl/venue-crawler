@@ -1,42 +1,42 @@
 name: crawl-fast
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "7 1 * * *" # daily 01:07 UTC
 
 jobs:
   shard:
+    name: shard (${{ matrix.brand }}, ${{ matrix.shard }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         brand: [TagVenue, HireSpace]
-        shard: [1,2] # start small to test; we'll scale later
-    env:
-      APPS_SCRIPT_WEBHOOK: ${{ secrets.APPS_SCRIPT_WEBHOOK }}
-      JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
-      BRAND: ${{ matrix.brand }}
-      PAGES_PER_SHARD: 5   # test small first
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm ci || npm i
-      - run: npx playwright install --with-deps chromium
 
-      - name: Compute page range for this shard
-        id: pages
+      - name: Install deps
         run: |
-          START=$(( ( (${{ matrix.shard }} - 1 ) * $PAGES_PER_SHARD ) + 1 ))
-          END=$(( $START + $PAGES_PER_SHARD - 1 ))
-          echo "start=$START" >> $GITHUB_OUTPUT
-          echo "end=$END" >> $GITHUB_OUTPUT
+          npm ci || npm i
 
-      - name: Crawl
+      - name: Install Playwright (Chromium + system deps)
+        run: npx playwright install --with-deps chromium
+
+      - name: Run crawler (diagnostics)
         env:
-          START_PAGE: ${{ steps.pages.outputs.start }}
-          END_PAGE: ${{ steps.pages.outputs.end }}
-          DETAIL_CONCURRENCY: 8
-          LIST_CONCURRENCY: 3
+          BRAND: ${{ matrix.brand }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: 2
         run: node crawler.js
+
+      - name: Upload page artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: page-artifacts-${{ matrix.brand }}-${{ matrix.shard }}
+          path: artifacts/
+          if-no-files-found: warn
