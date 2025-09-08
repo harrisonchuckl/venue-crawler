@@ -5,38 +5,50 @@ on:
 
 jobs:
   shard:
-    name: shard (${{ matrix.brand }}, ${{ matrix.shard }})
-    runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
         brand: [TagVenue, HireSpace]
-        shard: [1, 2]
-    steps:
-      - uses: actions/checkout@v4
+        shard_index: [1, 2]   # two interleaved shards per brand
+    runs-on: ubuntu-latest
 
-      - uses: actions/setup-node@v4
+    env:
+      # <<< IMPORTANT: pass your secrets into the job environment >>>
+      APPS_SCRIPT_WEBHOOK: ${{ secrets.APPS_SCRIPT_WEBHOOK }}
+      JOB_TOKEN: ${{ secrets.JOB_TOKEN }} # optional; only if your Apps Script expects it
+      BRAND: ${{ matrix.brand }}
+      SHARD_INDEX: ${{ matrix.shard_index }}
+      SHARD_TOTAL: 2
+      MAX_PAGES: 9999
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
       - name: Install deps
         run: |
-          npm ci || npm i
+          npm i
 
-      - name: Install Playwright (Chromium + system deps)
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright (browser + deps)
+        run: |
+          npx playwright install --with-deps chromium
 
-      - name: Run crawler (diagnostics)
-        env:
-          BRAND: ${{ matrix.brand }}
-          SHARD: ${{ matrix.shard }}
-          SHARDS: 2
+      - name: Run crawler
         run: node crawler.js
 
-      - name: Upload page artifacts
+      # Optional: upload the first-page screenshots/html for debugging
+      - name: Upload artifacts (debug)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: page-artifacts-${{ matrix.brand }}-${{ matrix.shard }}
-          path: artifacts/
-          if-no-files-found: warn
+          name: ${ { matrix.brand } }-${ { matrix.shard_index } }
+          path: |
+            tagvenue-p*.png
+            tagvenue-p*.html
+            hirespace-p*.png
+            hirespace-p*.html
+          if-no-files-found: ignore
