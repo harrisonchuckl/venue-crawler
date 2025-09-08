@@ -4,7 +4,7 @@
 // Actions: provided via secrets/environment.
 
 const { chromium } = require('playwright');
-const pLimit = require('p-limit');
+const { default: pLimit } = require('p-limit'); // works with ESM-only p-limit
 const axios = require('axios');
 
 const WEBHOOK = process.env.APPS_SCRIPT_WEBHOOK || '';
