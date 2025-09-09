@@ -1,47 +1,40 @@
 name: crawl-fast
+
 on:
   workflow_dispatch:
-    inputs:
-      brand:
-        description: Brand to crawl (HireSpace | TagVenue | All)
-        required: true
-        default: All
+
 jobs:
-  shard:
-    strategy:
-      matrix:
-        brand: [HireSpace, TagVenue]
-        shard: [1, 2]
+  crawl:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm i
-      - run: npx playwright install --with-deps chromium
-      - name: Export proxy env
-        run: |
-          echo "Using ScraperAPI proxy"
-          echo "SCRAPERAPI_KEY set? ${{ secrets.SCRAPERAPI_KEY != '' }}"
-          echo "COUNTRY: ${{ secrets.SCRAPERAPI_COUNTRY || 'gb' }}"
-          echo "BRAND=${{ matrix.brand }}  SHARD=${{ matrix.shard }}"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run scraper
         env:
+          APPS_SCRIPT_WEBHOOK: ${{ secrets.APPS_SCRIPT_WEBHOOK }}
+          JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
           SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
-          SCRAPERAPI_COUNTRY: ${{ secrets.SCRAPERAPI_COUNTRY || 'gb' }}
-      - name: Run
-        env:
-          SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
-          SCRAPERAPI_COUNTRY: ${{ secrets.SCRAPERAPI_COUNTRY || 'gb' }}
-          BRAND: ${{ matrix.brand }}
-          SHARD: ${{ matrix.shard }}
-        run: |
-          node scraper.js All
-      - uses: actions/upload-artifact@v4
+        run: npm run crawl:all
+
+      - name: Upload debug pages
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: pages-${{ matrix.brand }}-${{ matrix.shard }}
+          name: pages
           path: |
-            hirespace-p*.png
-            hirespace-p*.html
             tagvenue-p*.png
             tagvenue-p*.html
+            hirespace-p*.png
+            hirespace-p*.html
