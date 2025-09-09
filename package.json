@@ -1,11 +1,16 @@
 {
   "name": "venue-crawler",
-  "private": true,
+  "version": "1.0.0",
   "type": "module",
+  "license": "MIT",
   "scripts": {
-    "start": "node crawler.js"
+    "crawl:hirespace": "node scraper.js HireSpace",
+    "crawl:tagvenue": "node scraper.js TagVenue",
+    "crawl:both": "node scraper.js All"
   },
   "dependencies": {
-    "playwright": "^1.46.0"
+    "cheerio": "^1.0.0",
+    "node-fetch": "^3.3.2",
+    "p-limit": "^5.0.0"
   }
 }
