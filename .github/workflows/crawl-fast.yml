@@ -1,0 +1,61 @@
+name: crawl-fast
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - ".github/workflows/crawl-fast.yml"
+      - "crawler.js"
+      - "selectors.config.js"
+      - "package.json"
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        brand: [TagVenue, HireSpace]
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm i
+
+      - name: Install Playwright (Chromium) + system deps
+        run: npx playwright install --with-deps chromium
+
+      - name: Set env (proxy + shard)
+        run: |
+          echo "Using PROXY_URL from secrets."
+          echo "PROXY_URL=${{ secrets.PROXY_URL }}" >> $GITHUB_ENV
+          echo "APPS_SCRIPT_WEBHOOK=${{ secrets.APPS_SCRIPT_WEBHOOK }}" >> $GITHUB_ENV
+          echo "JOB_TOKEN=${{ secrets.JOB_TOKEN }}" >> $GITHUB_ENV
+          echo "BRAND=${{ matrix.brand }}" >> $GITHUB_ENV
+          echo "SHARD=${{ matrix.shard }}" >> $GITHUB_ENV
+
+      - name: Run crawler
+        env:
+          PROXY_URL: ${{ env.PROXY_URL }}
+          APPS_SCRIPT_WEBHOOK: ${{ env.APPS_SCRIPT_WEBHOOK }}
+          JOB_TOKEN: ${{ env.JOB_TOKEN }}
+          BRAND: ${{ env.BRAND }}
+          SHARD: ${{ env.SHARD }}
+        run: node crawler.js
+
+      - name: Upload debug artifacts (screens + HTML)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.brand }}-${{ matrix.shard }}
+          path: |
+            tagvenue-p*.png
+            tagvenue-p*.html
+            hirespace-p*.png
+            hirespace-p*.html
+          if-no-files-found: ignore
