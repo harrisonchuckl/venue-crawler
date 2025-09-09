@@ -1,52 +1,41 @@
 name: crawl-fast
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      brand:
+        description: "Which brand to crawl (HireSpace | TagVenue | All)"
+        required: true
+        default: "All"
 
 jobs:
-  shard:
+  crawl:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        brand: [TagVenue, HireSpace]
-        shard: [1, 2] # reserved for future splitting
+    timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
 
-      - run: npm i
+      - name: Install deps
+        run: npm i
 
-      - name: Install Playwright (Chromium)
-        run: npx playwright install --with-deps chromium
-
-      - name: Run crawler
+      - name: Run scraper
         env:
-          BRAND: ${{ matrix.brand }}
-          SHARD: ${{ matrix.shard }}
+          SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
           APPS_SCRIPT_WEBHOOK: ${{ secrets.APPS_SCRIPT_WEBHOOK }}
           JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
-
-          # ScraperAPI (recommended): set these two secrets in Settings → Secrets
-          SCRAPERAPI_KEY: ${{ secrets.SCRAPERAPI_KEY }}
-          SCRAPER_COUNTRY: gb
-
-          # Legacy fallback (leave empty): http://user:pass@host:port  (no query)
-          PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
-          echo "BRAND=$BRAND SHARD=$SHARD"
-          node crawler.js
-
-      - name: Upload debug artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pages-${{ matrix.brand }}-${{ matrix.shard }}
-          path: |
-            tagvenue-p*.png
-            tagvenue-p*.html
-            hirespace-p*.png
-            hirespace-p*.html
-          if-no-files-found: ignore
+          echo "brand input = ${{ github.event.inputs.brand }}"
+          if [ "${{ github.event.inputs.brand }}" = "HireSpace" ]; then
+            npm run crawl:hirespace
+          elif [ "${{ github.event.inputs.brand }}" = "TagVenue" ]; then
+            npm run crawl:tagvenue
+          else
+            npm run crawl:both
+          fi
