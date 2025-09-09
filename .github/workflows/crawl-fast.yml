@@ -1,0 +1,34 @@
+name: crawl-fast
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * *"
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        brand: [TagVenue, HireSpace]
+        shard: [1, 2]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm i
+
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run crawler
+        env:
+          APPS_SCRIPT_WEBHOOK: ${{ secrets.APPS_SCRIPT_WEBHOOK }}
+          JOB_TOKEN: ${{ secrets.JOB_TOKEN }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          echo "Using PROXY_URL from secrets."
+          node crawler.js
