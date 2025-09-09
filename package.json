@@ -1,13 +1,11 @@
 {
   "name": "venue-crawler",
-  "version": "1.0.0",
-  "type": "module",
   "private": true,
+  "type": "module",
   "scripts": {
-    "crawl": "node crawler.js"
+    "start": "node crawler.js"
   },
   "dependencies": {
-    "p-limit": "^5.0.0",
-    "playwright": "^1.48.0"
+    "playwright": "^1.46.0"
   }
 }
