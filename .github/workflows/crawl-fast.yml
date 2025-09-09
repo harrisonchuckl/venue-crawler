@@ -1,51 +1,66 @@
 name: crawl-fast
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crawl-fast
+  cancel-in-progress: false
 
 jobs:
-  shard:
-    strategy:
-      matrix:
-        brand: [TagVenue, HireSpace]
-        shard_index: [1, 2]   # two interleaved shards per brand
+  crawl:
+    name: Run crawler
     runs-on: ubuntu-latest
 
-    env:
-      # <<< IMPORTANT: pass your secrets into the job environment >>>
-      APPS_SCRIPT_WEBHOOK: ${{ secrets.APPS_SCRIPT_WEBHOOK }}
-      JOB_TOKEN: ${{ secrets.JOB_TOKEN }} # optional; only if your Apps Script expects it
-      BRAND: ${{ matrix.brand }}
-      SHARD_INDEX: ${{ matrix.shard_index }}
-      SHARD_TOTAL: 2
-      MAX_PAGES: 9999
-
     steps:
-      - name: Checkout
+      - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
       - name: Install deps
-        run: |
-          npm i
+        run: npm i
 
-      - name: Install Playwright (browser + deps)
+      - name: Install Playwright (Chromium + system deps)
+        run: npx playwright install --with-deps chromium
+
+      - name: Prepare environment (build PROXY_URL if only API key is present)
+        shell: bash
         run: |
-          npx playwright install --with-deps chromium
+          # Required
+          echo "APPS_SCRIPT_WEBHOOK=${{ secrets.APPS_SCRIPT_WEBHOOK }}" >> $GITHUB_ENV
+          echo "JOB_TOKEN=${{ secrets.JOB_TOKEN }}" >> $GITHUB_ENV
+
+          # Proxy URL priority:
+          # 1) If PROXY_URL secret provided, use it as-is.
+          # 2) Else if SCRAPERAPI_KEY secret provided, construct a GB exit proxy URL.
+          if [ -n "${{ secrets.PROXY_URL }}" ]; then
+            echo "PROXY_URL=${{ secrets.PROXY_URL }}" >> $GITHUB_ENV
+            echo "Using PROXY_URL from secrets."
+          elif [ -n "${{ secrets.SCRAPERAPI_KEY }}" ]; then
+            echo "PROXY_URL=http://${{ secrets.SCRAPERAPI_KEY }}:@proxy-server.scraperapi.com:8001?country_code=gb" >> $GITHUB_ENV
+            echo "Built PROXY_URL from SCRAPERAPI_KEY (GB egress)."
+          else
+            echo "No proxy configured (PROXY_URL and SCRAPERAPI_KEY are empty). Running direct."
+          fi
 
       - name: Run crawler
+        env:
+          APPS_SCRIPT_WEBHOOK: ${{ env.APPS_SCRIPT_WEBHOOK }}
+          JOB_TOKEN: ${{ env.JOB_TOKEN }}
+          PROXY_URL: ${{ env.PROXY_URL }}
         run: node crawler.js
 
-      # Optional: upload the first-page screenshots/html for debugging
-      - name: Upload artifacts (debug)
-        if: always()
+      - name: Upload snapshots (if any)
         uses: actions/upload-artifact@v4
         with:
-          name: ${ { matrix.brand } }-${ { matrix.shard_index } }
+          name: crawl-debug-pages
           path: |
             tagvenue-p*.png
             tagvenue-p*.html
